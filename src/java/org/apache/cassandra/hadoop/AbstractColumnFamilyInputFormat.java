@@ -202,14 +202,14 @@ public abstract class AbstractColumnFamilyInputFormat<K, Y> extends InputFormat<
 
             while (!splitfutures.isEmpty())
             {
-                Iterator<Future<List<InputSplit>>> iterator = splitfutures.keySet().iterator();
+                Iterator<Future<List<InputSplit>>> iterator = ImmutableList.copyOf(splitfutures.keySet()).iterator();
                 //noinspection WhileLoopReplaceableByForEach
                 while (iterator.hasNext()) {
                     Future<List<InputSplit>> split = iterator.next();
                     try
                     {
                         splits.addAll(split.get());
-                        iterator.remove();
+                        splitfutures.remove(split);
                     }
                     catch (Exception e)
                     {
@@ -221,8 +221,8 @@ public abstract class AbstractColumnFamilyInputFormat<K, Y> extends InputFormat<
                         SplitCallable callable = splitfutures.get(split);
                         Future<List<InputSplit>> future = executor.submit(callable);
                         splitfutures.put(future, callable);
-                        // Remove failed split future
-                        iterator.remove();
+                        // remove failed future
+                        splitfutures.remove(split);
                         retries += 1;
                    }
                 }
