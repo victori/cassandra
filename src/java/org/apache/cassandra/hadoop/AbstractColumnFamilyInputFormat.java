@@ -70,6 +70,8 @@ public abstract class AbstractColumnFamilyInputFormat<K, Y> extends InputFormat<
     public static final String CASSANDRA_HADOOP_MAX_KEY_SIZE = "cassandra.hadoop.max_key_size";
     public static final int    CASSANDRA_HADOOP_MAX_KEY_SIZE_DEFAULT = 8192;
 
+    private static final int MAX_RETRIES = 5;
+
     private String keyspace;
     private String cfName;
     private IPartitioner partitioner;
@@ -136,7 +138,7 @@ public abstract class AbstractColumnFamilyInputFormat<K, Y> extends InputFormat<
 
         try
         {
-            List<Future<List<InputSplit>>> splitfutures = new ArrayList<Future<List<InputSplit>>>();
+            Map<Future<List<InputSplit>>, SplitCallable> splitfutures = new HashMap<Future<List<InputSplit>>, SplitCallable>();
             KeyRange jobKeyRange = ConfigHelper.getInputKeyRange(conf);
             Range<Token> jobRange = null;
             if (jobKeyRange != null)
@@ -170,7 +172,10 @@ public abstract class AbstractColumnFamilyInputFormat<K, Y> extends InputFormat<
                 if (jobRange == null)
                 {
                     // for each range, pick a live owner and ask it to compute bite-sized splits
-                    splitfutures.add(executor.submit(new SplitCallable(range, conf)));
+
+                    SplitCallable callable = new SplitCallable(range, conf);
+                    Future<List<InputSplit>> future = executor.submit(callable);
+                    splitfutures.put(future, callable);
                 }
                 else
                 {
@@ -185,22 +190,41 @@ public abstract class AbstractColumnFamilyInputFormat<K, Y> extends InputFormat<
                             range.start_token = partitioner.getTokenFactory().toString(intersection.left);
                             range.end_token = partitioner.getTokenFactory().toString(intersection.right);
                             // for each range, pick a live owner and ask it to compute bite-sized splits
-                            splitfutures.add(executor.submit(new SplitCallable(range, conf)));
+                            SplitCallable callable = new SplitCallable(range, conf);
+                            Future<List<InputSplit>> future = executor.submit(callable);
+                            splitfutures.put(future, callable);
                         }
                     }
                 }
             }
 
-            // wait until we have all the results back
-            for (Future<List<InputSplit>> futureInputSplits : splitfutures)
+            int retries = 0;
+
+            while (!splitfutures.isEmpty())
             {
-                try
-                {
-                    splits.addAll(futureInputSplits.get());
-                }
-                catch (Exception e)
-                {
-                    throw new IOException("Could not get input splits", e);
+                Iterator<Future<List<InputSplit>>> iterator = splitfutures.keySet().iterator();
+                //noinspection WhileLoopReplaceableByForEach
+                while (iterator.hasNext()) {
+                    Future<List<InputSplit>> split = iterator.next();
+                    try
+                    {
+                        splits.addAll(split.get());
+                        iterator.remove();
+                    }
+                    catch (Exception e)
+                    {
+                        if (retries >= MAX_RETRIES)
+                        {
+                            throw new IOException("Could not get input splits", e);
+                        }
+                        logger.error("Failed to fetch split, resubmitting.", e);
+                        SplitCallable callable = splitfutures.get(split);
+                        Future<List<InputSplit>> future = executor.submit(callable);
+                        splitfutures.put(future, callable);
+                        // Remove failed split future
+                        iterator.remove();
+                        retries += 1;
+                   }
                 }
             }
         }
